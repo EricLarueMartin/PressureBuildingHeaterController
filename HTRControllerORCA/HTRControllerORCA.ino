@@ -20,8 +20,8 @@ const double Kd = 0.01;
 const double SetPoint = 8.0; // should be about 8 psi
 
 // use linear approximation since we really only need a general idea of temeprature
-double slopeADCtoK = 4.096; // deg K / ADC
-double offsetADCtoK = -3894.3; // offset to ADC * slope for 0 K
+double slopeADCtoK = 1/1.024; // deg K / ADC
+double offsetADCtoK = 30.0; // offset to ADC * slope for 0 K
 double MaxTemperature = 150.0; // don't run heater if it's warmer than 150 K.
 
 // strings take up memory, so those that occur in multiple places should refer to a global string
