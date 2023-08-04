@@ -6,6 +6,7 @@
 
 
 const int HTRCycleTime = 8192;
+const double MaxDutyCycle = 0.5; // limit to 50% power
 
 const int SensorPin = A0;
 const int ThermocouplePin = A1;
@@ -14,7 +15,7 @@ const int HeaterPin = 9;
 const int PowerLED = 5;
 const int HeaterLED = 6;
 
-const int LedMin = 20;
+const int LedMin = 100;
 const int LedMax = 200;
 const int LedPeriod = 2000;
 
@@ -26,9 +27,15 @@ const double Kd = 0.01;
 const double SetPoint = 8.0; // should be about 8 psi
 
 // use linear approximation since we really only need a general idea of temeprature
-double slopeADCtoK = 1/1.024; // deg K / ADC
-double offsetADCtoK = 30.0; // offset to ADC * slope for 0 K
-double MaxTemperature = 200.0; // don't run heater if it's warmer than this setting in Kelvin.
+// temperature = double(iTemperatureADCValue) * slopeADCtoK + offsetADCtoK;
+double slopeADCtoK = 1.5/1.024; // deg K / ADC
+double offsetADCtoK = -100.0; // offset to ADC * slope for 0 K
+double HighTemperatureTrip = 500.0; // don't run heater if temperature rises above this setting in Kelvin.
+double HighTemperatureReset = 100.0; // reset high temperature trip if drops below this setting in Kelvin.
+
+bool highTemperatureTripped = true; // should start out below 100 and immediately reset
+
+double MinTemperature = 50.0; // don't run heater if it's colder than this setting in Kelvin.
 
 // strings take up memory, so those that occur in multiple places should refer to a global string
 const char PressureMessage[] = {"Measured pressure is "};
@@ -385,6 +392,7 @@ void setup()
   HTRPID.inAuto = true;
   pinMode(PowerLED, OUTPUT);//for LED
   pinMode(HeaterLED, OUTPUT);//for LED
+  HTRPID.outMax = MaxDutyCycle;
   // load settings from EEPROM
   long iTest;
   EEPROM.get(0, iTest);
@@ -463,11 +471,14 @@ void loop()
   int iTemperatureADCValue = analogRead(ThermocouplePin);
   pressure = double(iPressureADCValue) * slopeADCtoPSIG + offsetADCtoPSIG; // 10 bit ADC with 5V full scale, 0.5 V is 0 psig, 4.5 V is 30 psig
   temperature = double(iTemperatureADCValue) * slopeADCtoK + offsetADCtoK;// 10 bit ADC with 5 V full scale, 1.25 V is room temperature and slope is 5 mV per degree
+  if (temperature > HighTemperatureTrip) highTemperatureTripped = true;
+  if (temperature < HighTemperatureReset) highTemperatureTripped = false;
 
   // compute the PID setting with measured pressure
   // Heater power is controller with pulse width modulation.
   if (HTRPID.Compute()) // If the PID recalculated heater power, this is also the start of the heater power window
   {
+    if (power > MaxDutyCycle) HTRPID.SetOutput(MaxDutyCycle);
     // turn the heater on at the beginning of the window and determine when to turn the heater off
     windowStopTime = (power > PowerPeriodInMs / HTRPID.sampleTime) ? power * HTRPID.sampleTime : 0; // if it won't be at least one cycle, don't turn on the heater
     if (windowStopTime > HTRPID.sampleTime) windowStopTime = HTRPID.sampleTime;
@@ -478,13 +489,16 @@ void loop()
         Serial.print(PressureMessage);
         Serial.print(pressure);
         Serial.println(PSIGMessage);
+        Serial.print(F("Temperature "));
+        Serial.print(temperature);
+        Serial.println('K');
         Serial.print(F("Turning heater on for "));
         Serial.print(windowStopTime);
         Serial.print(F(" out of "));
         Serial.print(HTRPID.sampleTime);
         Serial.println(MilliSecondsMessage);
-        if (temperature > MaxTemperature) {
-          Serial.print("Not turning heater on as temperature is too high at ");
+        if (highTemperatureTripped || temperature < MinTemperature) {
+          Serial.print("Not turning heater on as temperature is out of operation band at ");
           Serial.println(temperature);
         }
       }
@@ -497,7 +511,7 @@ void loop()
         Serial << kCustomValueChanged << "," << 1 << "," << windowStopTime << eol;
       }
     }
-    heaterOn = ((windowStopTime > 0) && (temperature < MaxTemperature)); // heater on bool tracks if it should be on, but it doesn't actually turn on unless temperature is sufficiently low
+    heaterOn = ((windowStopTime > 0) && (!highTemperatureTripped && temperature > MinTemperature)); // heater on bool tracks if it should be on, but it doesn't actually turn on unless temperature is sufficiently low
     windowStopTime += HTRPID.lastTime; // The heater pulse uses the same timing variable as the PID calculation to ensure synchronization.
   }
   else // if (HTRPID.Compute())
@@ -514,7 +528,7 @@ void loop()
       heaterOn = false;
     }
   }
-  if (temperature < MaxTemperature) { // interlock met
+  if (!highTemperatureTripped && temperature > MinTemperature) { // interlock met
     digitalWrite(HeaterPin, heaterOn); 
     digitalWrite(HeaterLED, heaterOn); 
   }
