@@ -4,9 +4,7 @@
 #include <CmdMessenger.h> //https://github.com/dreamcat4/cmdmessenger
 #include <Streaming.h>    //http://arduiniana.org/libraries/streaming/
 
-
 const int HTRCycleTime = 8192;
-const double MaxDutyCycle = 0.5; // limit to 50% power
 
 const int SensorPin = A0;
 const int ThermocouplePin = A1;
@@ -15,27 +13,15 @@ const int HeaterPin = 9;
 const int PowerLED = 5;
 const int HeaterLED = 6;
 
-const int LedMin = 100;
-const int LedMax = 200;
-const int LedPeriod = 2000;
-
-const int InterlockBlinkPeriod = 500; // period in ms for blinking heater LED if thermocouple interlock not met
-
 const double Kp = 0.1;
 const double Ki = 0.01;
 const double Kd = 0.01;
 const double SetPoint = 8.0; // should be about 8 psi
 
 // use linear approximation since we really only need a general idea of temeprature
-// temperature = double(iTemperatureADCValue) * slopeADCtoK + offsetADCtoK;
-double slopeADCtoK = 1.5/1.024; // deg K / ADC
-double offsetADCtoK = -100.0; // offset to ADC * slope for 0 K
-double HighTemperatureTrip = 500.0; // don't run heater if temperature rises above this setting in Kelvin.
-double HighTemperatureReset = 100.0; // reset high temperature trip if drops below this setting in Kelvin.
-
-bool highTemperatureTripped = true; // should start out below 100 and immediately reset
-
-double MinTemperature = 50.0; // don't run heater if it's colder than this setting in Kelvin.
+double slopeADCtoK = 1/1.024; // deg K / ADC
+double offsetADCtoK = 30.0; // offset to ADC * slope for 0 K
+double MaxTemperature = 150.0; // don't run heater if it's warmer than 150 K.
 
 // strings take up memory, so those that occur in multiple places should refer to a global string
 const char PressureMessage[] = {"Measured pressure is "};
@@ -51,7 +37,7 @@ double pressure;
 double power = 0.0;
 bool heaterOn = false;
 unsigned long windowStopTime = 0;
-int loopDelay = 10;
+int loopDelay = 1;
 double temperature = 300;
 
 bool humanReadable = false; // generate human readable serial outputs
@@ -385,14 +371,12 @@ void unKnownCmd()     {
 void setup()
 {
   wdt_enable(WDTO_8S);
-  delay(1000);
   analogReference(DEFAULT); // use the 5 V reference
   HTRPID.sampleTime = HTRCycleTime;
   pinMode(HeaterPin, OUTPUT);
   HTRPID.inAuto = true;
-  pinMode(PowerLED, OUTPUT);//for LED
-  pinMode(HeaterLED, OUTPUT);//for LED
-  HTRPID.outMax = MaxDutyCycle;
+  pinMode(5, OUTPUT);//for LED
+  pinMode(6, OUTPUT);//for LED
   // load settings from EEPROM
   long iTest;
   EEPROM.get(0, iTest);
@@ -400,9 +384,6 @@ void setup()
     LoadFromEEPROM();
 
   Serial.begin(115200); // Arduino Uno, Mega, with AT8u2 USB
-  wdt_reset(); // reset watchdog timer before delay
-  delay(1000);
-  wdt_reset(); // reset watchdog timer before delay
 
   cmdMessenger.print_LF_CR();
   cmdMessenger.attach(kCmdVerison,     sketchVersion);
@@ -417,7 +398,6 @@ void setup()
 
   //Tell the world we had a reset
   Serial << kArduinoStarted << ",Reset" << eol;
-  wdt_reset(); // reset watchdog timer before delay
 
 }
 
@@ -456,29 +436,21 @@ boolean debouncedDigitalRead(int aPin)
 //--------------------------------------------------------------
 void loop()
 {
-  static unsigned long tPowerLED = millis();
-  static unsigned long tInterlockLED = millis();
   parseSerial(); // this will check for human readable command codes, if not found the next line uses the cmdMessenger the Orca sketch uses
   cmdMessenger.feedinSerialData(); //process incoming commands
   scanInputsForChange();
   wdt_reset(); // reset watchdog timer before measurement
-  unsigned long now = millis();
-  if (now-tPowerLED>LedPeriod) tPowerLED = now;
-  if (now-tInterlockLED>InterlockBlinkPeriod) tInterlockLED = now;      
-  analogWrite(PowerLED,(now-tPowerLED)/LedPeriod*(LedMax-LedMin)+LedMin);//Turns on the Green LED
+  digitalWrite(PowerLED, HIGH);//Turns on the Green LED
   // read current pressure
   int iPressureADCValue = analogRead(SensorPin);
   int iTemperatureADCValue = analogRead(ThermocouplePin);
   pressure = double(iPressureADCValue) * slopeADCtoPSIG + offsetADCtoPSIG; // 10 bit ADC with 5V full scale, 0.5 V is 0 psig, 4.5 V is 30 psig
   temperature = double(iTemperatureADCValue) * slopeADCtoK + offsetADCtoK;// 10 bit ADC with 5 V full scale, 1.25 V is room temperature and slope is 5 mV per degree
-  if (temperature > HighTemperatureTrip) highTemperatureTripped = true;
-  if (temperature < HighTemperatureReset) highTemperatureTripped = false;
 
   // compute the PID setting with measured pressure
   // Heater power is controller with pulse width modulation.
   if (HTRPID.Compute()) // If the PID recalculated heater power, this is also the start of the heater power window
   {
-    if (power > MaxDutyCycle) HTRPID.SetOutput(MaxDutyCycle);
     // turn the heater on at the beginning of the window and determine when to turn the heater off
     windowStopTime = (power > PowerPeriodInMs / HTRPID.sampleTime) ? power * HTRPID.sampleTime : 0; // if it won't be at least one cycle, don't turn on the heater
     if (windowStopTime > HTRPID.sampleTime) windowStopTime = HTRPID.sampleTime;
@@ -489,7 +461,7 @@ void loop()
         Serial.print(PressureMessage);
         Serial.print(pressure);
         Serial.println(PSIGMessage);
-        Serial.print(F("Temperature "));
+        Serial.print("Temperature is ");
         Serial.print(temperature);
         Serial.println('K');
         Serial.print(F("Turning heater on for "));
@@ -497,8 +469,8 @@ void loop()
         Serial.print(F(" out of "));
         Serial.print(HTRPID.sampleTime);
         Serial.println(MilliSecondsMessage);
-        if (highTemperatureTripped || temperature < MinTemperature) {
-          Serial.print("Not turning heater on as temperature is out of operation band at ");
+        if (temperature > MaxTemperature) {
+          Serial.print("Not turning heater on as temperature is too high at ");
           Serial.println(temperature);
         }
       }
@@ -511,12 +483,15 @@ void loop()
         Serial << kCustomValueChanged << "," << 1 << "," << windowStopTime << eol;
       }
     }
-    heaterOn = ((windowStopTime > 0) && (!highTemperatureTripped && temperature > MinTemperature)); // heater on bool tracks if it should be on, but it doesn't actually turn on unless temperature is sufficiently low
+    heaterOn = (windowStopTime > 0);
+    digitalWrite(HeaterPin, heaterOn && temperature < MaxTemperature); // heater on bool tracks if it should be on, but it doesn't actually turn on unless temperature is sufficiently low
+    digitalWrite(HeaterLED, heaterOn); //turn on the red LED
     windowStopTime += HTRPID.lastTime; // The heater pulse uses the same timing variable as the PID calculation to ensure synchronization.
   }
   else // if (HTRPID.Compute())
   {
     // If the heater is on and it's time to turn it off, then do so
+    unsigned long now = millis();
     if ((now > windowStopTime) && heaterOn)
     {
       if (Serial && humanReadable)
@@ -526,15 +501,9 @@ void loop()
         Serial.println(F(" turning heater off."));
       }
       heaterOn = false;
+      digitalWrite(HeaterPin, LOW);
+      digitalWrite(HeaterLED, LOW); //turn off the Red LED
     }
-  }
-  if (!highTemperatureTripped && temperature > MinTemperature) { // interlock met
-    digitalWrite(HeaterPin, heaterOn); 
-    digitalWrite(HeaterLED, heaterOn); 
-  }
-  else { // interlock NOT met
-    digitalWrite(HeaterPin, LOW); // keep heater off
-    digitalWrite(HeaterLED,((now-tInterlockLED)<(InterlockBlinkPeriod/2))); //blink the red LED     
   }
   if (loopDelay)
   {
